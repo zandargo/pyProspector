@@ -1,4 +1,4 @@
-"""
+﻿"""
 PyProspector — B2B Lead Prospecting Tool via Google Maps
 =========================================================
 Stack : Python · Playwright · playwright-stealth · Streamlit · Pandas · openpyxl
@@ -170,12 +170,12 @@ def _collect_place_urls(page, target: int) -> list[str]:
     return list(seen)[:target]
 
 
-def _extract_place_data(page) -> dict | None:
+def _extract_place_data(page, maps_url: str = "") -> dict | None:
     """
     Extracts all relevant fields from a Google Maps place page.
 
-    Uses multiple CSS selectors with fallbacks for resilience
-    against Google Maps layout changes.
+    Uses a single JavaScript scan of all [data-item-id] elements for
+    contact info (more reliable than individual Playwright queries).
 
     Returns a dict with the fields or None if the name cannot be extracted.
     """
@@ -222,81 +222,75 @@ def _extract_place_data(page) -> dict | None:
     except Exception:
         pass
 
-    # ── Address ───────────────────────────────────────────────────────────────
-    address = ""
+    # ── Contact info via JavaScript scan ──────────────────────────────────────
+    # Wait for the info panel buttons to appear, then read everything in one JS
+    # call — avoids races and glyph-character issues from inner_text().
     try:
-        for sel in [
-            "button[data-item-id='address']",
-            "button[aria-label*='Address' i]",
-            "button[aria-label*='Endereço' i]",
-            "[data-tooltip*='address' i]",
-        ]:
-            el = page.query_selector(sel)
-            if not el:
-                continue
-            # Prefer aria-label (clean text), fall back to inner_text
-            raw = (
-                _safe_attr(el, "aria-label")
-                or el.inner_text(timeout=3_000).strip().split("\n")[0]
-            )
-            # Strip leading label prefix and private-use-area glyph characters
-            raw = re.sub(r"^[Ee]ndere[çc]o[:\s]*(\u200b)?", "", raw)
-            raw = re.sub(r"^[Aa]ddress[:\s]*(\u200b)?", "", raw)
-            raw = re.sub(r"[\x00-\x1f\x7f\ue000-\uf8ff]+", "", raw).strip()
-            if raw:
-                address = raw
-                break
+        page.wait_for_selector("[data-item-id]", timeout=8_000)
+    except PWTimeout:
+        pass
+
+    info_items: dict = {}
+    try:
+        info_items = page.evaluate(
+            """
+            () => {
+                const result = {};
+                document.querySelectorAll('[data-item-id]').forEach(el => {
+                    const id    = el.getAttribute('data-item-id') || '';
+                    const label = (el.getAttribute('aria-label') || '').trim();
+                    const href  = el.getAttribute('href') || '';
+                    // innerText of the text-only child div (skips SVG / icon spans)
+                    const textDiv = el.querySelector(
+                        'div.Io6YTe, div[class*="fontBody"], div.rogA2c + div'
+                    );
+                    const text = textDiv
+                        ? textDiv.innerText.split('\\n')[0].trim()
+                        : el.innerText.split('\\n')[0].trim();
+                    if (id) result[id] = { label, text, href };
+                });
+                return result;
+            }
+            """
+        )
     except Exception:
         pass
+
+    def _best(d: dict) -> str:
+        """Return the best non-empty string from label → text → href."""
+        return (d.get("label") or d.get("text") or d.get("href") or "").strip()
+
+    def _strip_glyphs(s: str) -> str:
+        return re.sub(r"[\x00-\x1f\x7f\ue000-\uf8ff]+", "", s).strip()
+
+    # ── Address ───────────────────────────────────────────────────────────────
+    address = ""
+    addr_raw = _strip_glyphs(_best(info_items.get("address", {})))
+    if addr_raw:
+        addr_raw = re.sub(r"^[Ee]ndere[çc]o[:\s]*", "", addr_raw)
+        addr_raw = re.sub(r"^[Aa]ddress[:\s]*", "", addr_raw).strip()
+        address = addr_raw
 
     # ── Phone ─────────────────────────────────────────────────────────────────
     phone = ""
-    try:
-        for sel in [
-            "button[data-item-id^='phone:tel:']",
-            "button[aria-label*='Phone' i]",
-            "button[aria-label*='Telefone' i]",
-            "button[aria-label*='Call' i]",
-        ]:
-            el = page.query_selector(sel)
-            if not el:
-                continue
-            raw = (
-                _safe_attr(el, "aria-label")
-                or el.inner_text(timeout=3_000).strip().split("\n")[0]
-            )
-            raw = re.sub(r"^[Tt]elefone[:\s]*(\u200b)?", "", raw)
-            raw = re.sub(r"^[Pp]hone[\s\w]*?[:\s]*(\u200b)?", "", raw)
-            raw = re.sub(r"^[Cc]all[\s\w]*?[:\s]*(\u200b)?", "", raw)
-            raw = re.sub(r"[\x00-\x1f\x7f\ue000-\uf8ff]+", "", raw).strip()
+    for key, val in info_items.items():
+        if key.startswith("phone:tel:"):
+            raw = _strip_glyphs(_best(val))
+            raw = re.sub(r"^[Tt]elefone[:\s]*", "", raw)
+            raw = re.sub(r"^[Pp]hone[\s\S]*?:\s*", "", raw)
+            raw = re.sub(r"^[Cc]all[\s\S]*?:\s*", "", raw)
+            raw = raw.strip()
             if raw:
                 phone = raw
-                break
-    except Exception:
-        pass
+            break
 
     # ── Website ───────────────────────────────────────────────────────────────
     website = ""
-    try:
-        # data-item-id="authority" is the link to the external website
-        web_a = page.query_selector("a[data-item-id='authority']")
-        if web_a:
-            website = _safe_attr(web_a, "href") or _safe_text(web_a)
-        else:
-            for sel in [
-                "a[aria-label*='site' i][href*='http']",
-                "a[aria-label*='website' i][href*='http']",
-                "a[aria-label*='web' i][href*='http']",
-            ]:
-                try:
-                    el = page.query_selector(sel)
-                    if el:
-                        website = _safe_attr(el, "href")
-                        break
-                except Exception:
-                    pass
-    except Exception:
-        pass
+    auth = info_items.get("authority", {})
+    website = (
+        auth.get("href")
+        or _strip_glyphs(auth.get("label") or auth.get("text") or "")
+    )
 
     return {
         "name":     name,
@@ -306,6 +300,7 @@ def _extract_place_data(page) -> dict | None:
         "website":  website,
         "rating":   rating,
         "reviews":  reviews,
+        "maps_url": maps_url,
     }
 
 
@@ -433,7 +428,7 @@ def scrape_google_maps(
                     page.goto(url, wait_until="domcontentloaded", timeout=25_000)
                     _delay(1.5, 3.0)
 
-                    data = _extract_place_data(page)
+                    data = _extract_place_data(page, maps_url=url)
                     if data is None:
                         continue
 
@@ -444,7 +439,7 @@ def scrape_google_maps(
                     leads.append(data)
                     _status(
                         f"🧩 Phase 2 — {i + 1} / {len(place_urls)} — "
-                        f"last: **{data['name']}**"
+                        f"Processing: **{data['name']}**"
                     )
 
                     if progress_callback:
@@ -488,7 +483,7 @@ def process_data(raw: list[dict]) -> pd.DataFrame:
         return pd.DataFrame(
             columns=[
                 "name", "category", "address", "phone",
-                "website", "has_website", "rating", "reviews", "score",
+                "website", "has_website", "rating", "reviews", "score", "maps_url",
             ]
         )
 
@@ -514,7 +509,7 @@ def process_data(raw: list[dict]) -> pd.DataFrame:
     # Column display order
     ordered = [
         "name", "category", "address", "phone",
-        "website", "has_website", "rating", "reviews", "score",
+        "website", "has_website", "rating", "reviews", "score", "maps_url",
     ]
     return df[[c for c in ordered if c in df.columns]]
 
@@ -534,6 +529,7 @@ _COL_LABELS = {
     "rating":      "Rating (★)",
     "reviews":     "No. of Reviews",
     "score":       "Score",
+    "maps_url":    "Google Maps",
 }
 
 
@@ -762,6 +758,7 @@ def main() -> None:
             "score":       st.column_config.ProgressColumn(
                                "Score", max_value=max_score, format="%.1f"
                            ),
+            "maps_url":    st.column_config.LinkColumn("📍 Maps",     width="small"),
         }
 
         st.dataframe(
