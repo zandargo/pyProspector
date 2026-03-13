@@ -780,7 +780,10 @@ def main() -> None:
         # ── Interactive table ──────────────────────────────────────────────────
         st.subheader("📊 Results (sorted by score)")
 
-        max_score = df["score"].max() or 1.0
+        hide_pages = st.checkbox("🚫 Hide businesses with a normal webpage", value=False)
+        display_df = df[df["site_type"] != "Page"] if hide_pages else df
+
+        max_score = display_df["score"].max() or 1.0
         col_cfg = {
             "name":        st.column_config.TextColumn("Name",        width="medium"),
             "category":    st.column_config.TextColumn("Category",    width="small"),
@@ -810,7 +813,7 @@ def main() -> None:
         ]
 
         st.dataframe(
-            df,
+            display_df,
             width='stretch',
             hide_index=True,
             column_config=col_cfg,
