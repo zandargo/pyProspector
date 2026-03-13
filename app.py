@@ -9,8 +9,9 @@ Scraping flow (2 phases):
 
 Fitness score for web dev / digital marketing services:
   base  = (rating × 10) × (number_of_reviews / 100)
-  final = base × 2.5   →  no website  (high priority 🔥)
-  final = base          →  has website
+  final = base × 10   →  no website        (🔥 highest priority)
+  final = base × 5    →  social network URL (🟡 medium priority)
+  final = base × 1    →  proper website     (low priority)
 """
 
 from __future__ import annotations
@@ -470,20 +471,21 @@ def process_data(raw: list[dict]) -> pd.DataFrame:
 
     Operations:
     - Type normalisation (rating → float, reviews → int)
-    - has_website column (bool)
+    - site_type column ("Page" | "Social Network" | "")
     - Fitness score calculation for web dev / digital marketing
     - Descending sort by score
 
     Score:
         base  = (rating × 10) × (reviews / 100)
-        final = base × 2.5  →  NO website (🔥 high priority)
-        final = base         →  has website
+        final = base × 10  →  no website        (🔥 highest priority)
+        final = base × 5   →  social network URL (🟡 medium priority)
+        final = base × 1   →  proper website     (low priority)
     """
     if not raw:
         return pd.DataFrame(
             columns=[
                 "name", "category", "address", "phone", "whatsapp_url",
-                "website", "has_website", "rating", "reviews", "score", "maps_url",
+                "website", "site_type", "rating", "reviews", "score", "maps_url",
             ]
         )
 
@@ -496,8 +498,19 @@ def process_data(raw: list[dict]) -> pd.DataFrame:
     )
     df["website"] = df.get("website", "").fillna("").str.strip()
 
-    # Digital presence indicator
-    df["has_website"] = df["website"].str.len() > 0
+    # Classify site type: "Page", "Social Network", or "" (none)
+    _SOCIAL_RE = re.compile(
+        r"(instagram|facebook|linkedin)\.com", re.I
+    )
+
+    def _classify_site(url: str) -> str:
+        if not url:
+            return ""
+        if _SOCIAL_RE.search(url):
+            return "Social Network"
+        return "Page"
+
+    df["site_type"] = df["website"].apply(_classify_site)
 
     # WhatsApp Web link — put formatted phone in fragment so it can be shown
     # as display text. Browsers strip the fragment before contacting wa.me,
@@ -511,9 +524,10 @@ def process_data(raw: list[dict]) -> pd.DataFrame:
 
     df["whatsapp_url"] = df["phone"].apply(_whatsapp_url)
 
-    # Score calculation using the specified formula
+    # Score calculation: x10 no site, x5 social network, x1 real page
     base = (df["rating"] * 10) * (df["reviews"] / 100)
-    df["score"] = base.where(df["has_website"], base * 2.5).round(2)
+    _multiplier = df["site_type"].map({"": 10.0, "Social Network": 5.0, "Page": 1.0})
+    df["score"] = (base * _multiplier).round(2)
 
     # Sort by score (highest priority first)
     df = df.sort_values("score", ascending=False).reset_index(drop=True)
@@ -521,7 +535,7 @@ def process_data(raw: list[dict]) -> pd.DataFrame:
     # Column display order
     ordered = [
         "name", "category", "address", "phone", "whatsapp_url",
-        "website", "has_website", "rating", "reviews", "score", "maps_url",
+        "website", "site_type", "rating", "reviews", "score", "maps_url",
     ]
     return df[[c for c in ordered if c in df.columns]]
 
@@ -538,7 +552,7 @@ _COL_LABELS = {
     "phone":         "Phone",
     "whatsapp_url":  "WhatsApp",
     "website":       "Website",
-    "has_website":   "Has Website?",
+    "site_type":     "Site type",
     "rating":        "Rating (★)",
     "reviews":       "No. of Reviews",
     "score":         "Score",
@@ -560,11 +574,12 @@ def generate_excel(df: pd.DataFrame) -> bytes:
     ws = wb.active
     ws.title = "B2B Leads"
 
-    header_fill  = PatternFill("solid", fgColor="2E75B6")
-    header_font  = Font(bold=True, color="FFFFFF", size=11)
-    no_site_fill = PatternFill("solid", fgColor="C6EFCE")   # no website
-    c_align      = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    l_align      = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+    header_fill    = PatternFill("solid", fgColor="2E75B6")
+    header_font    = Font(bold=True, color="FFFFFF", size=11)
+    no_site_fill   = PatternFill("solid", fgColor="C6EFCE")   # no website  → green
+    social_fill    = PatternFill("solid", fgColor="FFEB9C")   # social only → yellow
+    c_align        = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    l_align        = Alignment(horizontal="left",   vertical="center", wrap_text=True)
 
     headers = [_COL_LABELS.get(c, c) for c in df.columns]
 
@@ -577,8 +592,13 @@ def generate_excel(df: pd.DataFrame) -> bytes:
 
     # Data rows
     for row_i, row in enumerate(df.itertuples(index=False), 2):
-        has_site  = getattr(row, "has_website", True)
-        row_fill  = None if has_site else no_site_fill
+        site_type = getattr(row, "site_type", "Page")
+        if site_type == "":
+            row_fill = no_site_fill
+        elif site_type == "Social Network":
+            row_fill = social_fill
+        else:
+            row_fill = None
 
         for col_i, val in enumerate(row, 1):
             cell           = ws.cell(row=row_i, column=col_i, value=val)
@@ -614,8 +634,8 @@ def generate_txt(df: pd.DataFrame) -> bytes:
             if col not in df.columns:
                 continue
             val = row[col]
-            if col == "has_website":
-                val = "Yes" if val else "No"
+            if col == "site_type":
+                val = val if val else "None"
             lines.append(f"{label}: {val}")
         entries.append("\n".join(lines))
     return "\n\n\n".join(entries).encode("utf-8")
@@ -750,7 +770,7 @@ def main() -> None:
         # ── Quick metrics ─────────────────────────────────────────────────────
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("📋 Leads collected",  len(df))
-        m2.metric("🚫 No website",       int((~df["has_website"]).sum()))
+        m2.metric("🚫 No website",       int((df["site_type"] == "").sum()))
         m3.metric("⭐ Avg. rating",       f"{df['rating'].mean():.1f}")
         m4.metric("🏆 Top score",        f"{df['score'].max():.1f}")
 
@@ -771,7 +791,9 @@ def main() -> None:
                                help="Click to open WhatsApp Web for this number",
                            ),
             "website":     st.column_config.LinkColumn("Website",     width="medium"),
-            "has_website": st.column_config.CheckboxColumn("Has Site?"),
+            "site_type":   st.column_config.TextColumn("Site type",   width="small",
+                               help="Page · Social Network · (empty = no website)"),
+
             "rating":      st.column_config.NumberColumn("★ Rating",  format="%.1f"),
             "reviews":     st.column_config.NumberColumn("Reviews"),
             "score":       st.column_config.ProgressColumn(
@@ -784,7 +806,7 @@ def main() -> None:
         # is kept in the DataFrame for exports but hidden from the table.
         _display_order = [
             "name", "category", "address", "whatsapp_url",
-            "website", "has_website", "rating", "reviews", "score", "maps_url",
+            "website", "site_type", "rating", "reviews", "score", "maps_url",
         ]
 
         st.dataframe(
@@ -830,15 +852,16 @@ def main() -> None:
                 **Fitness formula for web dev / digital marketing services:**
                 ```
                 score_base  = (rating × 10) × (number_of_reviews / 100)
-                score_final = score_base × 2.5   →  NO website (🔥 high priority)
-                score_final = score_base           →  has website
+                score_final = score_base × 10   →  no website at all  (🔥 highest priority)
+                score_final = score_base × 5    →  social network URL  (🟡 medium priority)
+                score_final = score_base × 1    →  proper website       (low priority)
                 ```
-                Leads **without a website** with a good rating and high review volume
-                represent established businesses with a digital gap — the best
-                candidates for website creation, SEO and digital marketing services.
+                - **No website** → green rows in Excel. Established businesses with zero digital presence.
+                - **Social network only** → yellow rows. They have some online presence but no dedicated site.
+                - **Has a page** → no highlight. Lowest priority for web dev / marketing services.
 
-                > **Tip:** focus on the green rows in the Excel file — those are
-                > businesses with no digital presence that appear at the top of the list.
+                > **Tip:** social-network-only profiles (Instagram, Facebook, LinkedIn) are **not**
+                > counted as a real website — they score between "no site" and "has page".
                 """
             )
 
