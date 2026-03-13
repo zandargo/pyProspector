@@ -1,0 +1,28 @@
+# Ambiente virtual
+.venv/
+venv/
+env/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Playwright
+playwright/.auth/
+
+# Streamlit
+.streamlit/
+
+# Dados gerados
+*.xlsx
+*.tsv
+*.csv
+
+# IDEs
+.vscode/
+.idea/
+
+# Sistema
+.DS_Store
+Thumbs.db

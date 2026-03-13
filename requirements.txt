@@ -1,0 +1,14 @@
+# PyProspector — dependencies
+# Install with: pip install -r requirements.txt
+# After installing, run: playwright install chromium
+
+# Web interface
+streamlit>=1.32.0,<2.0.0
+
+# Web scraping and browser automation
+playwright>=1.40.0,<2.0.0
+playwright-stealth>=1.0.6
+
+# Data processing and export
+pandas>=2.1.0,<3.0.0
+openpyxl>=3.1.2,<4.0.0
