@@ -15,11 +15,15 @@ Fitness score for web dev / digital marketing services:
 
 from __future__ import annotations
 
+import asyncio
 import io
 import random
 import re
+import sys
 import time
 from urllib.parse import quote_plus, urljoin
+
+
 
 import pandas as pd
 import streamlit as st
@@ -31,7 +35,7 @@ from playwright_stealth import Stealth
 
 # ── Page configuration ───────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="PyProspector – Leads B2B",
+    page_title="PyProspector – B2B Leads",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -302,6 +306,7 @@ def scrape_google_maps(
     max_results: int = 50,
     min_rating: float = 0.0,
     progress_callback=None,
+    status_callback=None,
 ) -> list[dict]:
     """
     Scrapes establishments from Google Maps using Playwright + stealth.
@@ -326,6 +331,18 @@ def scrape_google_maps(
     search_url = MAPS_SEARCH_URL + quote_plus(query)
     ua         = random.choice(USER_AGENTS)
 
+    def _status(msg: str) -> None:
+        if status_callback:
+            status_callback(msg)
+
+    # Streamlit sets WindowsSelectorEventLoopPolicy on Windows, which breaks
+    # Playwright's subprocess launch. Force ProactorEventLoop right before
+    # sync_playwright() creates its internal event loop.
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+    _status("🌐 Launching browser…")
+
     with sync_playwright() as pw:
         # Command-line arguments to reduce automation fingerprints
         browser = pw.chromium.launch(
@@ -343,8 +360,8 @@ def scrape_google_maps(
         ctx = browser.new_context(
             user_agent=ua,
             viewport={"width": 1366, "height": 768},
-            locale="pt-BR",
-            timezone_id="America/Sao_Paulo",
+            locale="en-US",
+            timezone_id="America/New_York",
         )
         page = ctx.new_page()
 
@@ -359,6 +376,7 @@ def scrape_google_maps(
 
         try:
             # ── PHASE 1: Collect place URLs ────────────────────────────────────
+            _status(f"🔍 Phase 1 — Searching Google Maps for **{query}**…")
             page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
             _delay(2.5, 4.0)
             _handle_consent(page)
@@ -372,15 +390,24 @@ def scrape_google_maps(
                 )
                 return leads
 
+            _status("📜 Phase 1 — Scrolling feed to collect place links…")
             place_urls = _collect_place_urls(page, max_results)
             if not place_urls:
                 st.warning("No results found for this search.")
                 return leads
 
+            _status(
+                f"🔗 Phase 1 complete — {len(place_urls)} places found. "
+                "Starting detail extraction…"
+            )
             # ── PHASE 2: Visit each place and extract details ─────────────────
             for i, url in enumerate(place_urls):
                 if i > 0:
                     _delay(1.2, 2.8)   # be respectful between requests
+
+                _status(
+                    f"🧩 Phase 2 — Visiting place {i + 1} / {len(place_urls)}…"
+                )
 
                 try:
                     page.goto(url, wait_until="domcontentloaded", timeout=25_000)
@@ -395,6 +422,10 @@ def scrape_google_maps(
                         continue
 
                     leads.append(data)
+                    _status(
+                        f"🧩 Phase 2 — {i + 1} / {len(place_urls)} — "
+                        f"last: **{data['name']}**"
+                    )
 
                     if progress_callback:
                         progress_callback(len(leads), len(place_urls))
@@ -472,16 +503,16 @@ def process_data(raw: list[dict]) -> pd.DataFrame:
 # EXPORT
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Column name mapping for the output language
+# Column name mapping for Excel / TSV headers
 _COL_LABELS = {
-    "name":        "Nome",
-    "category":    "Categoria",
-    "address":     "Endereço",
-    "phone":       "Telefone",
+    "name":        "Name",
+    "category":    "Category",
+    "address":     "Address",
+    "phone":       "Phone",
     "website":     "Website",
-    "has_website": "Tem Website?",
+    "has_website": "Has Website?",
     "rating":      "Rating (★)",
-    "reviews":     "Nº Avaliações",
+    "reviews":     "No. of Reviews",
     "score":       "Score",
 }
 
@@ -498,7 +529,7 @@ def generate_excel(df: pd.DataFrame) -> bytes:
     """
     wb = Workbook()
     ws = wb.active
-    ws.title = "Leads B2B"
+    ws.title = "B2B Leads"
 
     header_fill  = PatternFill("solid", fgColor="2E75B6")
     header_font  = Font(bold=True, color="FFFFFF", size=11)
@@ -541,13 +572,22 @@ def generate_excel(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
-def generate_tsv(df: pd.DataFrame) -> bytes:
-    """Generates TSV (tab-separated values) content with translated headers."""
-    return (
-        df.rename(columns=_COL_LABELS)
-        .to_csv(sep="\t", index=False)
-        .encode("utf-8")
-    )
+def generate_txt(df: pd.DataFrame) -> bytes:
+    """
+    Generates a plain-text table aligned with spaces (no border characters).
+
+    Columns are padded to their widest value and separated by two spaces.
+    """
+    renamed = df.rename(columns=_COL_LABELS).astype(str)
+    col_widths = {
+        col: max(len(col), renamed[col].str.len().max())
+        for col in renamed.columns
+    }
+    lines: list[str] = []
+    lines.append("  ".join(col.ljust(col_widths[col]) for col in renamed.columns))
+    for _, row in renamed.iterrows():
+        lines.append("  ".join(str(v).ljust(col_widths[c]) for c, v in row.items()))
+    return "\n".join(lines).encode("utf-8")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -555,6 +595,12 @@ def generate_tsv(df: pd.DataFrame) -> bytes:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
+    # ── Session state ─────────────────────────────────────────────────────────
+    if "results_df" not in st.session_state:
+        st.session_state["results_df"] = None
+    if "results_slug" not in st.session_state:
+        st.session_state["results_slug"] = ""
+
     # ── Header ────────────────────────────────────────────────────────────────
     c_logo, c_title = st.columns([1, 9])
     with c_logo:
@@ -562,35 +608,35 @@ def main() -> None:
     with c_title:
         st.title("PyProspector")
         st.caption(
-            "Prospecção de Leads B2B via Google Maps · "
-            "Playwright + Streamlit · Scraping Ético"
+            "B2B Lead Prospecting via Google Maps · "
+            "Playwright + Streamlit · Ethical Scraping"
         )
     st.divider()
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
-        st.header("⚙️ Parâmetros de Busca")
+        st.header("⚙️ Search Parameters")
         st.markdown("---")
 
         niche = st.text_input(
-            "🏷️ Nicho / Segmento",
-            placeholder="ex: dentistas, clínicas, advogados",
-            help="Tipo de negócio que deseja prospectar.",
+            "🏷️ Niche / Segment",
+            placeholder="e.g. dentists, clinics, lawyers",
+            help="Type of business you want to prospect.",
         )
         city = st.text_input(
-            "📍 Cidade / País",
-            placeholder="ex: São Paulo, Brasil",
-            help="Localização para a busca no Google Maps.",
+            "📍 City / Country",
+            placeholder="e.g. New York, USA",
+            help="Location for the Google Maps search.",
         )
         max_results = st.slider(
-            "🔢 Máx. de resultados",
+            "🔢 Max. results",
             min_value=5,
             max_value=100,
             value=50,
             step=5,
         )
         min_rating = st.slider(
-            "⭐ Rating mínimo  (0 = todos)",
+            "⭐ Minimum rating  (0 = all)",
             min_value=0.0,
             max_value=5.0,
             value=0.0,
@@ -599,33 +645,36 @@ def main() -> None:
 
         st.markdown("---")
         run = st.button(
-            "🚀 Prospectar Leads",
+            "🚀 Prospect Leads",
             type="primary",
             use_container_width=True,
             disabled=not (niche.strip() and city.strip()),
         )
         if not (niche.strip() and city.strip()):
-            st.caption("⬆ Preencha o nicho e a cidade para ativar.")
+            st.caption("⬆ Fill in the niche and city to enable.")
 
     # ── Results area ──────────────────────────────────────────────────────────
     if run:
         niche = niche.strip()
         city  = city.strip()
 
+        # Clear previous results before a new search
+        st.session_state["results_df"]   = None
+        st.session_state["results_slug"] = ""
+
         info_box = st.info(
-            f"🔍 Buscando **{niche}** em **{city}** "
-            f"— até **{max_results}** resultados…"
+            f"🔍 Searching for **{niche}** in **{city}** "
+            f"— up to **{max_results}** results…"
         )
-        progress = st.progress(0, text="Iniciando scraping…")
+        progress = st.progress(0, text="Starting scraper…")
         status   = st.empty()
 
-        collected: list[dict] = []
+        def on_status(msg: str) -> None:
+            status.markdown(msg)
 
         def on_progress(current: int, total: int) -> None:
             pct = min(current / max(total, 1), 1.0)
-            progress.progress(pct, text=f"{current}/{total} leads coletados…")
-            if collected:
-                status.caption(f"Último coletado: **{collected[-1]['name']}**")
+            progress.progress(pct, text=f"Phase 2 — {current}/{total} leads extracted…")
 
         # Run the scraper (may take a few minutes)
         try:
@@ -635,9 +684,10 @@ def main() -> None:
                 max_results=max_results,
                 min_rating=min_rating,
                 progress_callback=on_progress,
+                status_callback=on_status,
             )
         except Exception as exc:
-            st.error(f"Erro crítico: {exc}")
+            st.error(f"Critical error: {exc}")
             st.stop()
         finally:
             progress.empty()
@@ -653,32 +703,42 @@ def main() -> None:
             )
             st.stop()
 
-        # Process and display
-        df = process_data(collected)
+        df   = process_data(collected)
+        slug = (
+            f"leads_{niche.replace(' ', '_')}_"
+            f"{city.split(',')[0].strip().replace(' ', '_')}"
+        )
+        st.session_state["results_df"]   = df
+        st.session_state["results_slug"] = slug
+
+    # ── Display results (from this run or preserved in session state) ──────────
+    if st.session_state["results_df"] is not None:
+        df   = st.session_state["results_df"]
+        slug = st.session_state["results_slug"]
 
         # ── Quick metrics ─────────────────────────────────────────────────────
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("📋 Leads coletados",  len(df))
-        m2.metric("🚫 Sem website",      int((~df["has_website"]).sum()))
-        m3.metric("⭐ Rating médio",      f"{df['rating'].mean():.1f}")
-        m4.metric("🏆 Top score",         f"{df['score'].max():.1f}")
+        m1.metric("📋 Leads collected",  len(df))
+        m2.metric("🚫 No website",       int((~df["has_website"]).sum()))
+        m3.metric("⭐ Avg. rating",       f"{df['rating'].mean():.1f}")
+        m4.metric("🏆 Top score",        f"{df['score'].max():.1f}")
 
-        st.success(f"✅ {len(df)} leads processados e ordenados por score!")
+        st.success(f"✅ {len(df)} leads processed and sorted by score!")
         st.divider()
 
         # ── Interactive table ──────────────────────────────────────────────────
-        st.subheader("📊 Resultados (ordenados por score)")
+        st.subheader("📊 Results (sorted by score)")
 
         max_score = df["score"].max() or 1.0
         col_cfg = {
-            "name":        st.column_config.TextColumn("Nome",       width="medium"),
-            "category":    st.column_config.TextColumn("Categoria",  width="small"),
-            "address":     st.column_config.TextColumn("Endereço",   width="large"),
-            "phone":       st.column_config.TextColumn("Telefone",   width="small"),
-            "website":     st.column_config.LinkColumn("Website",    width="medium"),
-            "has_website": st.column_config.CheckboxColumn("Tem Site?"),
-            "rating":      st.column_config.NumberColumn("★ Rating", format="%.1f"),
-            "reviews":     st.column_config.NumberColumn("Avaliações"),
+            "name":        st.column_config.TextColumn("Name",        width="medium"),
+            "category":    st.column_config.TextColumn("Category",    width="small"),
+            "address":     st.column_config.TextColumn("Address",     width="large"),
+            "phone":       st.column_config.TextColumn("Phone",       width="small"),
+            "website":     st.column_config.LinkColumn("Website",     width="medium"),
+            "has_website": st.column_config.CheckboxColumn("Has Site?"),
+            "rating":      st.column_config.NumberColumn("★ Rating",  format="%.1f"),
+            "reviews":     st.column_config.NumberColumn("Reviews"),
             "score":       st.column_config.ProgressColumn(
                                "Score", max_value=max_score, format="%.1f"
                            ),
@@ -694,18 +754,13 @@ def main() -> None:
 
         # ── Download buttons ───────────────────────────────────────────────────
         st.divider()
-        st.subheader("⬇️ Exportar dados")
-
-        slug = (
-            f"leads_{niche.replace(' ', '_')}_"
-            f"{city.split(',')[0].strip().replace(' ', '_')}"
-        )
+        st.subheader("⬇️ Export data")
 
         dl1, dl2 = st.columns(2)
 
         with dl1:
             st.download_button(
-                label="📥 Baixar Excel (.xlsx)",
+                label="📥 Download Excel (.xlsx)",
                 data=generate_excel(df),
                 file_name=f"{slug}.xlsx",
                 mime=(
@@ -717,29 +772,29 @@ def main() -> None:
 
         with dl2:
             st.download_button(
-                label="📄 Baixar Texto Tabulado (.tsv)",
-                data=generate_tsv(df),
-                file_name=f"{slug}.tsv",
-                mime="text/tab-separated-values",
+                label="📄 Download Plain Text Table (.txt)",
+                data=generate_txt(df),
+                file_name=f"{slug}.txt",
+                mime="text/plain",
                 use_container_width=True,
             )
 
         # ── Score explanation ──────────────────────────────────────────────────
-        with st.expander("ℹ️ Como o Score é calculado?"):
+        with st.expander("ℹ️ How is the Score calculated?"):
             st.markdown(
                 """
-                **Fórmula de adequação para web dev / marketing digital:**
+                **Fitness formula for web dev / digital marketing services:**
                 ```
-                score_base  = (rating × 10) × (nº_avaliações / 100)
-                score_final = score_base × 2.5   →  SEM website (🔥 alta prioridade)
-                score_final = score_base           →  COM website
+                score_base  = (rating × 10) × (number_of_reviews / 100)
+                score_final = score_base × 2.5   →  NO website (🔥 high priority)
+                score_final = score_base           →  has website
                 ```
-                Leads **sem website** que têm bom rating e alto volume de avaliações
-                representam negócios consolidados com lacuna digital — os melhores
-                candidatos para criação de sites, SEO e marketing digital.
+                Leads **without a website** with a good rating and high review volume
+                represent established businesses with a digital gap — the best
+                candidates for website creation, SEO and digital marketing services.
 
-                > **Dica:** foque nos leads verdes na planilha Excel — são os que
-                > não têm presença digital e aparecem primeiro na lista.
+                > **Tip:** focus on the green rows in the Excel file — those are
+                > businesses with no digital presence that appear at the top of the list.
                 """
             )
 
@@ -747,28 +802,28 @@ def main() -> None:
         # ── Welcome / home screen ────────────────────────────────────────────────
         st.markdown(
             """
-            ### Como usar o PyProspector
+            ### How to use PyProspector
 
-            | Etapa | Ação |
+            | Step | Action |
             |:-----:|------|
-            | 1️⃣ | Preencha o **nicho** na barra lateral (ex: *escritórios de advocacia*) |
-            | 2️⃣ | Informe a **cidade/país**  (ex: *Belo Horizonte, Brasil*) |
-            | 3️⃣ | Ajuste a quantidade máxima e o rating mínimo |
-            | 4️⃣ | Clique em **🚀 Prospectar Leads** e aguarde |
+            | 1️⃣ | Fill in the **niche** in the sidebar (e.g., *law firms*) |
+            | 2️⃣ | Enter the **city/country**  (e.g., *Belo Horizonte, Brazil*) |
+            | 3️⃣ | Adjust the maximum number of results and the minimum rating |
+            | 4️⃣ | Click **🚀 Prospect Leads** and wait |
 
             ---
 
-            **Casos de uso ideais:**
-            - Agências de web design prospectando PMEs sem presença digital
-            - Freelancers de SEO / tráfego pago buscando novos clientes
-            - Consultores de marketing digital em busca de oportunidades locais
-            - Equipes de vendas realizando prospecção outbound B2B
+            **Ideal use cases:**
+            - Web design agencies prospecting SMBs without a digital presence
+            - SEO and paid traffic freelancers looking for new clients
+            - Digital marketing consultants doing outbound B2B prospecting
+            - Sales teams conducting local market research
 
             ---
 
-            > ⚠️ **Uso responsável:** utilize esta ferramenta com moderação e
-            > respeite os [Termos de Uso do Google Maps](https://maps.google.com/help/terms_maps/).
-            > Este projeto tem fins educacionais e de automação ética.
+            > ⚠️ **Responsible use:** use this tool in moderation and
+            > respect the [Google Maps Terms of Service](https://maps.google.com/help/terms_maps/).
+            > This project is for educational and ethical automation purposes.
             """
         )
 
