@@ -590,20 +590,22 @@ def generate_excel(df: pd.DataFrame) -> bytes:
 
 def generate_txt(df: pd.DataFrame) -> bytes:
     """
-    Generates a plain-text table aligned with spaces (no border characters).
+    Generates a plain-text list of leads, one labeled field per line.
 
-    Columns are padded to their widest value and separated by two spaces.
+    Places are separated by two blank lines.
     """
-    renamed = df.rename(columns=_COL_LABELS).astype(str)
-    col_widths = {
-        col: max(len(col), renamed[col].str.len().max())
-        for col in renamed.columns
-    }
-    lines: list[str] = []
-    lines.append("  ".join(col.upper().ljust(col_widths[col]) for col in renamed.columns))
-    for _, row in renamed.iterrows():
-        lines.append("  ".join(str(v).ljust(col_widths[c]) for c, v in row.items()))
-    return "\n".join(lines).encode("utf-8")
+    entries: list[str] = []
+    for _, row in df.iterrows():
+        lines = []
+        for col, label in _COL_LABELS.items():
+            if col not in df.columns:
+                continue
+            val = row[col]
+            if col == "has_website":
+                val = "Yes" if val else "No"
+            lines.append(f"{label}: {val}")
+        entries.append("\n".join(lines))
+    return "\n\n\n".join(entries).encode("utf-8")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
