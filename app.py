@@ -305,6 +305,63 @@ def _extract_place_data(page, maps_url: str = "") -> dict | None:
     }
 
 
+def _extract_reviews(page, max_reviews: int) -> list[str]:
+    """
+    Switches to the Reviews tab on a Maps place page and returns the plain
+    text of the first `max_reviews` customer reviews.
+
+    Returns an empty list if no reviews are found or on any error.
+    """
+    # Try to click the Reviews tab to make all reviews visible
+    for sel in [
+        "button[aria-label*='review' i]",
+        "button[data-tab-index='1']",
+    ]:
+        try:
+            el = page.query_selector(sel)
+            if el and el.is_visible(timeout=2_000):
+                el.click()
+                _delay(1.0, 2.0)
+                break
+        except Exception:
+            pass
+
+    # Wait for review text elements to appear
+    try:
+        page.wait_for_selector("span.wiI7pd", timeout=8_000)
+    except PWTimeout:
+        return []
+
+    # Expand truncated reviews ("More" buttons) for the first N items
+    try:
+        more_btns = page.query_selector_all("button.w8nwRe, button[aria-label*='more' i]")
+        for btn in more_btns[:max_reviews]:
+            try:
+                if btn.is_visible(timeout=1_000):
+                    btn.click()
+                    _delay(0.15, 0.35)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Collect review texts
+    texts: list[str] = []
+    try:
+        spans = page.query_selector_all("span.wiI7pd")
+        for sp in spans[:max_reviews]:
+            try:
+                t = sp.inner_text().strip()
+                if t:
+                    texts.append(t)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return texts
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SCRAPING — main function
 # ══════════════════════════════════════════════════════════════════════════════
@@ -314,6 +371,8 @@ def scrape_google_maps(
     city: str,
     max_results: int = 50,
     min_rating: float = 0.0,
+    review_keywords: list[str] | None = None,
+    review_scan_count: int = 5,
     progress_callback=None,
     status_callback=None,
 ) -> list[dict]:
@@ -326,15 +385,18 @@ def scrape_google_maps(
          phone, website, rating and number of reviews.
 
     Args:
-        niche:             Business segment (e.g. "dentists").
-        city:              Location (e.g. "São Paulo, Brasil").
-        max_results:       Maximum number of leads to extract.
-        min_rating:        Minimum rating filter (0.0 = no filter).
-        progress_callback: Callable(current: int, total: int) for progress.
+        niche:              Business segment (e.g. "dentists").
+        city:               Location (e.g. "São Paulo, Brasil").
+        max_results:        Maximum number of leads to extract.
+        min_rating:         Minimum rating filter (0.0 = no filter).
+        review_keywords:    Optional list of keywords to search in reviews.
+        review_scan_count:  How many reviews to read per place (1‑200).
+        progress_callback:  Callable(current: int, total: int) for progress.
 
     Returns:
         List of dicts, one per lead found.
     """
+    _kw_list: list[str] = [kw.strip() for kw in (review_keywords or []) if kw.strip()]
     leads: list[dict] = []
     query      = f"{niche} {city}"
     search_url = MAPS_SEARCH_URL + quote_plus(query)
@@ -437,6 +499,21 @@ def scrape_google_maps(
                     if min_rating > 0.0 and data["rating"] < min_rating:
                         continue
 
+                    # ── Review keyword search (optional) ──────────────────
+                    if _kw_list:
+                        _status(
+                            f"🧩 Phase 2 — {i + 1} / {len(place_urls)} — "
+                            f"Reading reviews: **{data['name']}**…"
+                        )
+                        review_texts = _extract_reviews(page, review_scan_count)
+                        found = [
+                            kw for kw in _kw_list
+                            if any(kw.lower() in rt.lower() for rt in review_texts)
+                        ]
+                        data["matched_keywords"] = ", ".join(found)
+                    else:
+                        data["matched_keywords"] = ""
+
                     leads.append(data)
                     _status(
                         f"🧩 Phase 2 — {i + 1} / {len(place_urls)} — "
@@ -485,7 +562,8 @@ def process_data(raw: list[dict]) -> pd.DataFrame:
         return pd.DataFrame(
             columns=[
                 "name", "category", "address", "phone", "whatsapp_url",
-                "website", "site_type", "rating", "reviews", "score", "maps_url",
+                "website", "site_type", "matched_keywords",
+                "rating", "reviews", "score", "maps_url",
             ]
         )
 
@@ -496,7 +574,8 @@ def process_data(raw: list[dict]) -> pd.DataFrame:
     df["reviews"] = (
         pd.to_numeric(df["reviews"], errors="coerce").fillna(0).astype(int)
     )
-    df["website"] = df.get("website", "").fillna("").str.strip()
+    df["website"]          = df.get("website", "").fillna("").str.strip()
+    df["matched_keywords"] = df.get("matched_keywords", "").fillna("")
 
     # Classify site type: "Page", "Social Network", or "" (none)
     _SOCIAL_RE = re.compile(
@@ -535,7 +614,8 @@ def process_data(raw: list[dict]) -> pd.DataFrame:
     # Column display order
     ordered = [
         "name", "category", "address", "phone", "whatsapp_url",
-        "website", "site_type", "rating", "reviews", "score", "maps_url",
+        "website", "site_type", "matched_keywords",
+        "rating", "reviews", "score", "maps_url",
     ]
     return df[[c for c in ordered if c in df.columns]]
 
@@ -552,7 +632,8 @@ _COL_LABELS = {
     "phone":         "Phone",
     "whatsapp_url":  "WhatsApp",
     "website":       "Website",
-    "site_type":     "Site type",
+    "site_type":          "Site type",
+    "matched_keywords":   "Keywords Found",
     "rating":        "Rating (★)",
     "reviews":       "No. of Reviews",
     "score":         "Score",
@@ -695,6 +776,30 @@ def main() -> None:
         )
 
         st.markdown("---")
+        st.markdown("#### 🔎 Review Keyword Search *(optional)*")
+        kw_raw = st.text_area(
+            "Keywords (one per line)",
+            placeholder="e.g.\ndelivery\nbad service\nparking",
+            help=(
+                "Scan the first N customer reviews of each place. "
+                "Matched keywords will appear in the results table."
+            ),
+            height=100,
+        )
+        review_scan_count = st.slider(
+            "Reviews to scan per place",
+            min_value=1,
+            max_value=200,
+            value=5,
+            step=1,
+            help="Higher values are more thorough but slower.",
+            disabled=not kw_raw.strip(),
+        )
+        review_keywords = [
+            ln.strip() for ln in kw_raw.splitlines() if ln.strip()
+        ]
+
+        st.markdown("---")
         run = st.button(
             "🚀 Prospect Leads",
             type="primary",
@@ -734,6 +839,8 @@ def main() -> None:
                 city=city,
                 max_results=max_results,
                 min_rating=min_rating,
+                review_keywords=review_keywords,
+                review_scan_count=review_scan_count,
                 progress_callback=on_progress,
                 status_callback=on_status,
             )
@@ -794,8 +901,10 @@ def main() -> None:
                                help="Click to open WhatsApp Web for this number",
                            ),
             "website":     st.column_config.LinkColumn("Website",     width="medium"),
-            "site_type":   st.column_config.TextColumn("Site type",   width="small",
-                               help="Page · Social Network · (empty = no website)"),
+            "site_type":        st.column_config.TextColumn("Site type",      width="small",
+                                    help="Page · Social Network · (empty = no website)"),
+            "matched_keywords": st.column_config.TextColumn("Keywords Found", width="medium",
+                                    help="Review keywords matched for this place"),
 
             "rating":      st.column_config.NumberColumn("★ Rating",  format="%.1f"),
             "reviews":     st.column_config.NumberColumn("Reviews"),
@@ -809,7 +918,8 @@ def main() -> None:
         # is kept in the DataFrame for exports but hidden from the table.
         _display_order = [
             "name", "category", "address", "whatsapp_url",
-            "website", "site_type", "rating", "reviews", "score", "maps_url",
+            "website", "site_type", "matched_keywords",
+            "rating", "reviews", "score", "maps_url",
         ]
 
         st.dataframe(
