@@ -225,40 +225,53 @@ def _extract_place_data(page) -> dict | None:
     # ── Address ───────────────────────────────────────────────────────────────
     address = ""
     try:
-        # data-item-id="address" is the most stable selector
-        addr_btn = page.query_selector("button[data-item-id='address']")
-        if addr_btn:
-            address = addr_btn.inner_text().strip().split("\n")[0]
-        else:
-            for lbl in ["Endereço", "Address"]:
-                try:
-                    el = page.get_by_label(re.compile(lbl, re.I)).first
-                    raw = _safe_attr(el, "aria-label") or _safe_text(el)
-                    address = re.sub(r"^[Ee]ndere[çc]o[:\s]*", "", raw).strip()
-                    if address:
-                        break
-                except Exception:
-                    pass
+        for sel in [
+            "button[data-item-id='address']",
+            "button[aria-label*='Address' i]",
+            "button[aria-label*='Endereço' i]",
+            "[data-tooltip*='address' i]",
+        ]:
+            el = page.query_selector(sel)
+            if not el:
+                continue
+            # Prefer aria-label (clean text), fall back to inner_text
+            raw = (
+                _safe_attr(el, "aria-label")
+                or el.inner_text(timeout=3_000).strip().split("\n")[0]
+            )
+            # Strip leading label prefix and private-use-area glyph characters
+            raw = re.sub(r"^[Ee]ndere[çc]o[:\s]*(\u200b)?", "", raw)
+            raw = re.sub(r"^[Aa]ddress[:\s]*(\u200b)?", "", raw)
+            raw = re.sub(r"[\x00-\x1f\x7f\ue000-\uf8ff]+", "", raw).strip()
+            if raw:
+                address = raw
+                break
     except Exception:
         pass
 
     # ── Phone ─────────────────────────────────────────────────────────────────
     phone = ""
     try:
-        # data-item-id starts with 'phone:tel:' on Maps
-        phone_btn = page.query_selector("button[data-item-id^='phone:tel:']")
-        if phone_btn:
-            phone = phone_btn.inner_text().strip().split("\n")[0]
-        else:
-            for lbl in ["Telefone", "Phone number", "Call phone"]:
-                try:
-                    el = page.get_by_label(re.compile(lbl, re.I)).first
-                    raw = _safe_attr(el, "aria-label") or _safe_text(el)
-                    phone = re.sub(r"^[Tt]elefone[:\s]*", "", raw).strip()
-                    if phone:
-                        break
-                except Exception:
-                    pass
+        for sel in [
+            "button[data-item-id^='phone:tel:']",
+            "button[aria-label*='Phone' i]",
+            "button[aria-label*='Telefone' i]",
+            "button[aria-label*='Call' i]",
+        ]:
+            el = page.query_selector(sel)
+            if not el:
+                continue
+            raw = (
+                _safe_attr(el, "aria-label")
+                or el.inner_text(timeout=3_000).strip().split("\n")[0]
+            )
+            raw = re.sub(r"^[Tt]elefone[:\s]*(\u200b)?", "", raw)
+            raw = re.sub(r"^[Pp]hone[\s\w]*?[:\s]*(\u200b)?", "", raw)
+            raw = re.sub(r"^[Cc]all[\s\w]*?[:\s]*(\u200b)?", "", raw)
+            raw = re.sub(r"[\x00-\x1f\x7f\ue000-\uf8ff]+", "", raw).strip()
+            if raw:
+                phone = raw
+                break
     except Exception:
         pass
 
@@ -405,8 +418,15 @@ def scrape_google_maps(
                 if i > 0:
                     _delay(1.2, 2.8)   # be respectful between requests
 
+                # Extract a human-readable name from the Maps URL path
+                _url_name_match = re.search(r"/maps/place/([^/@]+)", url)
+                _url_name = (
+                    _url_name_match.group(1).replace("+", " ").replace("%20", " ")
+                    if _url_name_match else url
+                )
                 _status(
-                    f"🧩 Phase 2 — Visiting place {i + 1} / {len(place_urls)}…"
+                    f"🧩 Phase 2 — {i + 1} / {len(place_urls)} — "
+                    f"Visiting **{_url_name}**…"
                 )
 
                 try:
@@ -584,7 +604,7 @@ def generate_txt(df: pd.DataFrame) -> bytes:
         for col in renamed.columns
     }
     lines: list[str] = []
-    lines.append("  ".join(col.ljust(col_widths[col]) for col in renamed.columns))
+    lines.append("  ".join(col.upper().ljust(col_widths[col]) for col in renamed.columns))
     for _, row in renamed.iterrows():
         lines.append("  ".join(str(v).ljust(col_widths[c]) for c, v in row.items()))
     return "\n".join(lines).encode("utf-8")
@@ -647,7 +667,7 @@ def main() -> None:
         run = st.button(
             "🚀 Prospect Leads",
             type="primary",
-            use_container_width=True,
+            width='stretch',
             disabled=not (niche.strip() and city.strip()),
         )
         if not (niche.strip() and city.strip()):
@@ -746,7 +766,7 @@ def main() -> None:
 
         st.dataframe(
             df,
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             column_config=col_cfg,
             height=520,
@@ -767,7 +787,7 @@ def main() -> None:
                     "application/vnd.openxmlformats-officedocument"
                     ".spreadsheetml.sheet"
                 ),
-                use_container_width=True,
+                width='stretch',
             )
 
         with dl2:
@@ -776,7 +796,7 @@ def main() -> None:
                 data=generate_txt(df),
                 file_name=f"{slug}.txt",
                 mime="text/plain",
-                use_container_width=True,
+                width='stretch',
             )
 
         # ── Score explanation ──────────────────────────────────────────────────
