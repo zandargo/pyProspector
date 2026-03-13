@@ -8,6 +8,11 @@ __pycache__/
 *.py[cod]
 *.pyo
 
+# Distribution
+dist/
+build/
+Output/
+
 # Playwright
 playwright/.auth/
 
