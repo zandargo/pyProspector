@@ -482,7 +482,7 @@ def process_data(raw: list[dict]) -> pd.DataFrame:
     if not raw:
         return pd.DataFrame(
             columns=[
-                "name", "category", "address", "phone",
+                "name", "category", "address", "phone", "whatsapp_url",
                 "website", "has_website", "rating", "reviews", "score", "maps_url",
             ]
         )
@@ -499,6 +499,18 @@ def process_data(raw: list[dict]) -> pd.DataFrame:
     # Digital presence indicator
     df["has_website"] = df["website"].str.len() > 0
 
+    # WhatsApp Web link — put formatted phone in fragment so it can be shown
+    # as display text. Browsers strip the fragment before contacting wa.me,
+    # so the link still opens on the correct number.
+    def _whatsapp_url(p: str) -> str:
+        phone_str = str(p).strip()
+        digits = re.sub(r"[^\d]", "", phone_str)
+        if not digits:
+            return ""
+        return f"https://wa.me/{digits}#{phone_str}" if phone_str else f"https://wa.me/{digits}"
+
+    df["whatsapp_url"] = df["phone"].apply(_whatsapp_url)
+
     # Score calculation using the specified formula
     base = (df["rating"] * 10) * (df["reviews"] / 100)
     df["score"] = base.where(df["has_website"], base * 2.5).round(2)
@@ -508,7 +520,7 @@ def process_data(raw: list[dict]) -> pd.DataFrame:
 
     # Column display order
     ordered = [
-        "name", "category", "address", "phone",
+        "name", "category", "address", "phone", "whatsapp_url",
         "website", "has_website", "rating", "reviews", "score", "maps_url",
     ]
     return df[[c for c in ordered if c in df.columns]]
@@ -520,16 +532,17 @@ def process_data(raw: list[dict]) -> pd.DataFrame:
 
 # Column name mapping for Excel / TSV headers
 _COL_LABELS = {
-    "name":        "Name",
-    "category":    "Category",
-    "address":     "Address",
-    "phone":       "Phone",
-    "website":     "Website",
-    "has_website": "Has Website?",
-    "rating":      "Rating (★)",
-    "reviews":     "No. of Reviews",
-    "score":       "Score",
-    "maps_url":    "Google Maps",
+    "name":          "Name",
+    "category":      "Category",
+    "address":       "Address",
+    "phone":         "Phone",
+    "whatsapp_url":  "WhatsApp",
+    "website":       "Website",
+    "has_website":   "Has Website?",
+    "rating":        "Rating (★)",
+    "reviews":       "No. of Reviews",
+    "score":         "Score",
+    "maps_url":      "Google Maps",
 }
 
 
@@ -752,7 +765,11 @@ def main() -> None:
             "name":        st.column_config.TextColumn("Name",        width="medium"),
             "category":    st.column_config.TextColumn("Category",    width="small"),
             "address":     st.column_config.TextColumn("Address",     width="large"),
-            "phone":       st.column_config.TextColumn("Phone",       width="small"),
+            "whatsapp_url": st.column_config.LinkColumn(
+                               "Phone", width="small",
+                               display_text=r"#(.+)",
+                               help="Click to open WhatsApp Web for this number",
+                           ),
             "website":     st.column_config.LinkColumn("Website",     width="medium"),
             "has_website": st.column_config.CheckboxColumn("Has Site?"),
             "rating":      st.column_config.NumberColumn("★ Rating",  format="%.1f"),
@@ -763,11 +780,19 @@ def main() -> None:
             "maps_url":    st.column_config.LinkColumn("📍 Maps",     width="small"),
         }
 
+        # column_order controls which columns are visible; 'phone' (raw text)
+        # is kept in the DataFrame for exports but hidden from the table.
+        _display_order = [
+            "name", "category", "address", "whatsapp_url",
+            "website", "has_website", "rating", "reviews", "score", "maps_url",
+        ]
+
         st.dataframe(
             df,
             width='stretch',
             hide_index=True,
             column_config=col_cfg,
+            column_order=_display_order,
             height=520,
         )
 
@@ -780,7 +805,7 @@ def main() -> None:
         with dl1:
             st.download_button(
                 label="📥 Download Excel (.xlsx)",
-                data=generate_excel(df),
+                data=generate_excel(df.drop(columns=["whatsapp_url"], errors="ignore")),
                 file_name=f"{slug}.xlsx",
                 mime=(
                     "application/vnd.openxmlformats-officedocument"
@@ -792,7 +817,7 @@ def main() -> None:
         with dl2:
             st.download_button(
                 label="📄 Download Plain Text Table (.txt)",
-                data=generate_txt(df),
+                data=generate_txt(df.drop(columns=["whatsapp_url"], errors="ignore")),
                 file_name=f"{slug}.txt",
                 mime="text/plain",
                 width='stretch',
